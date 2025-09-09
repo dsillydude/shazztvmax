@@ -1243,7 +1243,7 @@ app.post('/api/admin/seed', async (req, res) => {
       const defaultAdmin = new Admin({
         username: 'admin',
         email: 'admin@kijiweni.tv',
-        password: await bcrypt.hash('admin123', 10),
+        password: await bcrypt.hash('shazz321', 10),
         role: 'super_admin'
       });
       await defaultAdmin.save();
