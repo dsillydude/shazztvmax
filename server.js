@@ -32,6 +32,11 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10mb' }));
 
+// --- PATCH START: Trust proxy to get the correct IP address ---
+// This is important if your app is behind a load balancer or proxy (like on Render, Heroku, etc.)
+app.set('trust proxy', true);
+// --- PATCH END ---
+
 // Static file serving for uploaded images
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -102,19 +107,23 @@ mongoose.connect(MONGODB_URI)
 
 // --- Database Models -------------------------------------------------------
 
-// User Schema
+// --- PATCH START: Modified User Schema for Fingerprinting ---
 const UserSchema = new mongoose.Schema({
   id: { type: String, default: uuidv4, unique: true },
   email: { type: String, unique: true, sparse: true },
   password: { type: String },
   phoneNumber: { type: String },
-  deviceId: { type: String, unique: true, required: true },
+  // deviceId is no longer unique, as multiple devices can report the same one.
+  deviceId: { type: String, required: true, index: true },
+  // The fingerprint is the new unique identifier for a device instance.
+  deviceFingerprint: { type: String, unique: true, required: true, index: true },
   isPremium: { type: Boolean, default: false },
   premiumExpiryDate: { type: Date },
   createdAt: { type: Date, default: Date.now },
   lastLogin: { type: Date },
   isActive: { type: Boolean, default: true }
 });
+// --- PATCH END ---
 const User = mongoose.model('User', UserSchema);
 
 // Admin Schema
@@ -399,23 +408,44 @@ app.get('/api/health', (req, res) => {
 
 // --- Authentication Routes (Existing) --------------------------------------
 
+// --- PATCH START: Patched device-login to use fingerprinting ---
 app.post('/api/auth/device-login', async (req, res) => {
     try {
         const { deviceId } = req.body;
-        let user = await User.findOne({ deviceId });
+
+        if (!deviceId) {
+            return res.status(400).json({ error: 'deviceId is required' });
+        }
+
+        // 1. Capture extra data for the fingerprint
+        const userAgent = req.headers['user-agent'] || 'unknown';
+        const ip = req.ip;
+
+        // 2. Create a unique, consistent fingerprint for this device instance
+        const fingerprint = crypto.createHash('sha256')
+            .update(deviceId + userAgent + ip)
+            .digest('hex');
+
+        // 3. Find the user by the unique fingerprint, not the potentially shared deviceId
+        let user = await User.findOne({ deviceFingerprint: fingerprint });
 
         if (user) {
+            // User found, update their last login time
             user.lastLogin = new Date();
             await user.save();
         } else {
+            // No user with this fingerprint exists, so it's a new unique device.
+            // Create a new user record.
             user = new User({
-                deviceId: deviceId,
+                deviceId: deviceId, // Store the original deviceId
+                deviceFingerprint: fingerprint, // Store the new unique fingerprint
                 lastLogin: new Date(),
                 isPremium: false
             });
             await user.save();
         }
 
+        // 4. Generate a token and send the response
         const token = generateToken(user);
         res.json({
             message: 'Login successful',
@@ -424,9 +454,14 @@ app.post('/api/auth/device-login', async (req, res) => {
         });
     } catch (error) {
         console.error('Device login error:', error);
+        // Provide a more specific error if it's a duplicate key error from a hash collision (extremely rare)
+        if (error.code === 11000) {
+            return res.status(500).json({ error: 'A unique user could not be created. Please try again.' });
+        }
         res.status(500).json({ error: 'Internal server error' });
     }
 });
+// --- PATCH END ---
 
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
@@ -1299,7 +1334,7 @@ app.use((error, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 KIJIWENI Backend server v2.4 (URL Banners) running on port ${PORT}`);
+  console.log(`🚀 SHAZZ TV Backend server v2.4 (URL Banners) running on port ${PORT}`);
 });
 
 module.exports = app;
