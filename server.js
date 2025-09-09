@@ -3,6 +3,7 @@
  * -----------------------------------------------------------------
  * Patched banner creation/update to accept an image URL
  * instead of a file upload.
+ * Patched app configuration to save settings to the database.
  * =================================================================
  */
 
@@ -40,27 +41,49 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// --- MongoDB Connection ----------------------------------------------------
-// 1. NEW: Database schema for storing settings
+// --- Constants & Config -------------------------------------------------
+const TRIAL_MINUTES = 0;
+// These are now just defaults, the DB will be the source of truth.
+let SUBSCRIPTION_PLANS = {
+    weekly: { durationDays: 7, amount: 1000 },
+    monthly: { durationDays: 30, amount: 3000 },
+    yearly: { durationDays: 365, amount: 30000 },
+};
+let appSettings = {
+  whatsappLink: 'https://wa.me/255712345678' // Default fallback
+};
+
+
+// --- MongoDB Schemas -----------------------------------------------------
 const SettingSchema = new mongoose.Schema({
   key: { type: String, unique: true, required: true },
   value: { type: mongoose.Schema.Types.Mixed, required: true },
 });
 const Setting = mongoose.model('Setting', SettingSchema);
 
-// 2. NEW: Function to load settings from DB on startup
+// --- Function to load settings from DB on startup (MODIFIED) ---
 async function loadSettingsFromDatabase() {
   try {
+    // Load Subscription Plans
     const plansSetting = await Setting.findOne({ key: 'subscriptionPlans' });
     if (plansSetting) {
-      // If plans exist in the DB, use them
       SUBSCRIPTION_PLANS = plansSetting.value;
       console.log('✅ Subscription plans loaded from database.');
     } else {
-      // If not, save the default hardcoded plans to the DB for the first time
       await new Setting({ key: 'subscriptionPlans', value: SUBSCRIPTION_PLANS }).save();
       console.log('✅ Default subscription plans saved to database for the first time.');
     }
+
+    // Load App Settings (like WhatsApp link)
+    const appSettingsSetting = await Setting.findOne({ key: 'appSettings' });
+    if (appSettingsSetting) {
+      appSettings = appSettingsSetting.value;
+      console.log('✅ App settings loaded from database.');
+    } else {
+      await new Setting({ key: 'appSettings', value: appSettings }).save();
+      console.log('✅ Default app settings saved to database for the first time.');
+    }
+
   } catch (error) {
     console.error('❌ Failed to load settings from database:', error);
   }
@@ -72,18 +95,10 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://mackdsilly1:Ourfam
 mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('✅ Connected to MongoDB');
-    loadSettingsFromDatabase(); // Load settings after connecting to DB
+    loadSettingsFromDatabase(); // Load all settings after connecting to DB
   })
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
-// --- Constants & Config for Paywall ------------------------------------
-const TRIAL_MINUTES = 0;
-// This is now just a default, the DB will be the source of truth.
-let SUBSCRIPTION_PLANS = {
-    weekly: { durationDays: 7, amount: 1000 },
-    monthly: { durationDays: 30, amount: 3000 },
-    yearly: { durationDays: 365, amount: 30000 },
-};
 
 // --- Database Models -------------------------------------------------------
 
@@ -174,13 +189,13 @@ const HeroBanner = mongoose.model('HeroBanner', HeroBannerSchema);
 
 // Payment Schema
 const PaymentSchema = new mongoose.Schema({
-  orderId: { type: String, required: true, unique: true }, 
+  orderId: { type: String, required: true, unique: true },
   userId: { type: String, required: true },
   customerName: { type: String },
   amount: { type: Number, required: true },
   currency: { type: String, default: 'TZS' },
   paymentMethod: { type: String, default: 'ZenoPay' },
-  zenoTransactionId: { type: String }, 
+  zenoTransactionId: { type: String },
   status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
   subscriptionType: { type: String, enum: ['weekly', 'monthly', 'yearly'], required: true },
   createdAt: { type: Date, default: Date.now }
@@ -234,8 +249,8 @@ function generateToken(user, isAdmin = false) {
     isPremium: user.isPremium
   };
 
-  return jwt.sign(payload, process.env.JWT_SECRET, { 
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d' 
+  return jwt.sign(payload, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN || '7d'
   });
 }
 
@@ -300,7 +315,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ 
+const upload = multer({
   storage: storage,
   limits: {
     fileSize: 5 * 1024 * 1024 // 5MB limit
@@ -316,24 +331,39 @@ const upload = multer({
 
 // --- API Routes ------------------------------------------------------------
 
-// --- App Configuration ---
-// For now, we store this in memory. For a real app, you would store this in a new 'settings' collection in your database.
-let appSettings = {
-  whatsappLink: 'https://wa.me/255712345678' // <-- SET YOUR DEFAULT WHATSAPP NUMBER HERE
-};
+// --- App Configuration (MODIFIED TO USE DATABASE) ---
 
 // PUBLIC ENDPOINT: For the main app to get the config
-app.get('/api/config', (req, res) => {
-  res.json(appSettings);
+app.get('/api/config', async (req, res) => {
+    try {
+        // The 'appSettings' variable is loaded from the DB on startup.
+        // This serves the latest settings from memory for performance.
+        res.json(appSettings);
+    } catch (error) {
+        console.error('Error fetching config:', error);
+        res.status(500).json({ error: 'Failed to fetch settings' });
+    }
 });
 
 // ADMIN ENDPOINT: For the admin panel to update the config
-app.put('/api/admin/config', authenticateAdmin, (req, res) => {
-  const { whatsappLink } = req.body;
-  if (whatsappLink) {
-    appSettings.whatsappLink = whatsappLink;
-  }
-  res.json({ message: 'Settings updated successfully', settings: appSettings });
+app.put('/api/admin/config', authenticateAdmin, async (req, res) => {
+    try {
+        const { whatsappLink } = req.body;
+        if (whatsappLink) {
+            // Find and update the setting in the database, or create it if it doesn't exist
+            const updatedSetting = await Setting.findOneAndUpdate(
+                { key: 'appSettings' },
+                { $set: { 'value.whatsappLink': whatsappLink } },
+                { upsert: true, new: true }
+            );
+            // Update the in-memory settings as well for immediate access across the app
+            appSettings = updatedSetting.value;
+        }
+        res.json({ message: 'Settings updated successfully', settings: appSettings });
+    } catch (error) {
+        console.error('Error updating config:', error);
+        res.status(500).json({ error: 'Failed to update settings' });
+    }
 });
 
 
@@ -421,9 +451,9 @@ app.post('/api/admin/login', async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
-    const admin = await Admin.findOne({ 
+    const admin = await Admin.findOne({
       $or: [{ username }, { email: username }],
-      isActive: true 
+      isActive: true
     });
 
     if (!admin) {
@@ -466,18 +496,18 @@ app.get('/api/admin/me', authenticateAdmin, async (req, res) => {
 // --- Admin User Management Routes ------------------------------------------
 app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 20, 
-      search = '', 
-      isPremium, 
+    const {
+      page = 1,
+      limit = 20,
+      search = '',
+      isPremium,
       isActive,
       sortBy = 'createdAt',
       sortOrder = 'desc'
     } = req.query;
 
     const filter = {};
-    
+
     if (search) {
       filter.$or = [
         { email: { $regex: search, $options: 'i' } },
@@ -535,13 +565,13 @@ app.get('/api/admin/users/stats', authenticateAdmin, async (req, res) => {
       User.countDocuments(),
       User.countDocuments({ isActive: true }),
       User.countDocuments({ isPremium: true }),
-      User.countDocuments({ 
+      User.countDocuments({
         createdAt: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) }
       }),
-      User.countDocuments({ 
+      User.countDocuments({
         createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
       }),
-      User.countDocuments({ 
+      User.countDocuments({
         createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
       })
     ]);
@@ -708,11 +738,11 @@ app.get('/api/admin/payments/stats', authenticateAdmin, async (req, res) => {
         { $group: { _id: null, total: { $sum: '$amount' } } }
       ]),
       Payment.aggregate([
-        { 
-          $match: { 
+        {
+          $match: {
             status: 'completed',
             createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
-          } 
+          }
         },
         { $group: { _id: null, total: { $sum: '$amount' } } }
       ])
@@ -734,9 +764,9 @@ app.get('/api/admin/payments/stats', authenticateAdmin, async (req, res) => {
 
 app.get('/api/admin/payments', authenticateAdmin, async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 20, 
+    const {
+      page = 1,
+      limit = 20,
       status,
       subscriptionType,
       sortBy = 'createdAt',
@@ -744,7 +774,7 @@ app.get('/api/admin/payments', authenticateAdmin, async (req, res) => {
     } = req.query;
 
     const filter = {};
-    
+
     if (status) filter.status = status;
     if (subscriptionType) filter.subscriptionType = subscriptionType;
 
@@ -780,7 +810,7 @@ app.get('/api/admin/payments', authenticateAdmin, async (req, res) => {
 app.put('/api/admin/channels/:id/content', authenticateAdmin, async (req, res) => {
   try {
     const { contentIds } = req.body;
-    
+
     if (!Array.isArray(contentIds)) {
       return res.status(400).json({ error: 'contentIds must be an array' });
     }
@@ -875,7 +905,7 @@ app.post('/api/admin/banners', authenticateAdmin, async (req, res) => {
 app.put('/api/admin/banners/:id', authenticateAdmin, async (req, res) => {
   try {
     const { title, description, actionType, actionValue, imageUrl, isActive, position } = req.body;
-    
+
     const updateData = {};
     if (title !== undefined) updateData.title = title;
     if (description !== undefined) updateData.description = description;
@@ -1017,7 +1047,7 @@ if (!order_id || !payment_status) {
     console.warn('Webhook received with missing order_id or payment_status.');
     return res.status(400).send('Bad Request: Missing required fields.');
 }
-    
+
     console.log(`Processing webhook for order ${order_id}, status: ${payment_status}`);
 
     // --- Logic with Error Handling ---
