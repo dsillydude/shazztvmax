@@ -107,23 +107,17 @@ mongoose.connect(MONGODB_URI)
 
 // --- Database Models -------------------------------------------------------
 
-// --- PATCH START: Modified User Schema for Fingerprinting ---
+// --- PATCH: Replaced old UserSchema with the modern installationId version ---
 const UserSchema = new mongoose.Schema({
-  id: { type: String, default: uuidv4, unique: true },
+  installationId: { type: String, unique: true, sparse: true },
   email: { type: String, unique: true, sparse: true },
   password: { type: String },
-  phoneNumber: { type: String },
-  // deviceId is no longer unique, as multiple devices can report the same one.
-  deviceId: { type: String, required: true, index: true },
-  // The fingerprint is the new unique identifier for a device instance.
-  deviceFingerprint: { type: String, unique: true, required: true, index: true },
+  phoneNumber: { type: String, unique: true, sparse: true },
   isPremium: { type: Boolean, default: false },
   premiumExpiryDate: { type: Date },
-  createdAt: { type: Date, default: Date.now },
   lastLogin: { type: Date },
   isActive: { type: Boolean, default: true }
-});
-// --- PATCH END ---
+}, { timestamps: true }); // Using timestamps provides createdAt/updatedAt automatically
 const User = mongoose.model('User', UserSchema);
 
 // Admin Schema
@@ -196,34 +190,33 @@ const HeroBannerSchema = new mongoose.Schema({
 });
 const HeroBanner = mongoose.model('HeroBanner', HeroBannerSchema);
 
-// Payment Schema
+// --- PATCH: Updated PaymentSchema to include installationId ---
 const PaymentSchema = new mongoose.Schema({
   orderId: { type: String, required: true, unique: true },
-  userId: { type: String, required: true },
+  userId: { type: String }, // This is now the MongoDB _id
+  installationId: { type: String, index: true }, // The new primary link
+  phoneNumber: { type: String, index: true },
   customerName: { type: String },
   amount: { type: Number, required: true },
   currency: { type: String, default: 'TZS' },
   paymentMethod: { type: String, default: 'ZenoPay' },
   zenoTransactionId: { type: String },
   status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
-  subscriptionType: { type: String, enum: ['weekly', 'monthly', 'yearly'], required: true },
+  subscriptionType: { type: String, required: true },
   createdAt: { type: Date, default: Date.now }
 });
 const Payment = mongoose.model('Payment', PaymentSchema);
 
 // --- Helper Functions ------------------------------------------------------
 
+// --- PATCH: Standardized transformDoc helper ---
 function transformDoc(doc) {
   if (!doc) return null;
   const obj = doc.toObject ? doc.toObject() : { ...doc };
 
-  const isChannel = obj.hasOwnProperty('channelId') || obj.hasOwnProperty('playbackUrl') || obj.hasOwnProperty('position');
-
+  const isChannel = obj.hasOwnProperty('channelId') || obj.hasOwnProperty('playbackUrl');
   if (isChannel) {
-    if (!obj.playbackUrl && obj.streamUrl) {
-      obj.playbackUrl = obj.streamUrl;
-    }
-
+    if (!obj.playbackUrl && obj.streamUrl) obj.playbackUrl = obj.streamUrl;
     if (!obj.drm) {
       obj.drm = {
         enabled: obj.drmEnabled || false,
@@ -235,10 +228,10 @@ function transformDoc(doc) {
     delete obj.drmKey;
   }
 
+  obj.id = obj._id?.toString() || obj.id;
   delete obj.password;
-  delete obj.__v;
   delete obj._id;
-
+  delete obj.__v;
   return obj;
 }
 
@@ -408,44 +401,28 @@ app.get('/api/health', (req, res) => {
 
 // --- Authentication Routes (Existing) --------------------------------------
 
-// --- PATCH START: Patched device-login to use fingerprinting ---
+// --- PATCH: Replaced entire device-login with the strict installationId version ---
 app.post('/api/auth/device-login', async (req, res) => {
     try {
-        const { deviceId } = req.body;
-
-        if (!deviceId) {
-            return res.status(400).json({ error: 'deviceId is required' });
+        const { installationId } = req.body;
+        if (!installationId) {
+            return res.status(400).json({ error: 'installationId is required' });
         }
 
-        // 1. Capture extra data for the fingerprint
-        const userAgent = req.headers['user-agent'] || 'unknown';
-        const ip = req.ip;
-
-        // 2. Create a unique, consistent fingerprint for this device instance
-        const fingerprint = crypto.createHash('sha256')
-            .update(deviceId + userAgent + ip)
-            .digest('hex');
-
-        // 3. Find the user by the unique fingerprint, not the potentially shared deviceId
-        let user = await User.findOne({ deviceFingerprint: fingerprint });
+        let user = await User.findOne({ installationId });
 
         if (user) {
-            // User found, update their last login time
             user.lastLogin = new Date();
             await user.save();
         } else {
-            // No user with this fingerprint exists, so it's a new unique device.
-            // Create a new user record.
             user = new User({
-                deviceId: deviceId, // Store the original deviceId
-                deviceFingerprint: fingerprint, // Store the new unique fingerprint
+                installationId,
                 lastLogin: new Date(),
                 isPremium: false
             });
             await user.save();
         }
 
-        // 4. Generate a token and send the response
         const token = generateToken(user);
         res.json({
             message: 'Login successful',
@@ -454,14 +431,12 @@ app.post('/api/auth/device-login', async (req, res) => {
         });
     } catch (error) {
         console.error('Device login error:', error);
-        // Provide a more specific error if it's a duplicate key error from a hash collision (extremely rare)
         if (error.code === 11000) {
             return res.status(500).json({ error: 'A unique user could not be created. Please try again.' });
         }
         res.status(500).json({ error: 'Internal server error' });
     }
 });
-// --- PATCH END ---
 
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
@@ -627,39 +602,38 @@ app.get('/api/admin/users/stats', authenticateAdmin, async (req, res) => {
   }
 });
 
+// --- PATCH START: Upgraded admin routes to use findById and fetch live plans ---
 app.put('/api/admin/users/:id/premium', authenticateAdmin, async (req, res) => {
   try {
     const { isPremium, subscriptionType = 'monthly' } = req.body;
-    const user = await User.findOne({ id: req.params.id });
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    const user = await User.findById(req.params.id); // Use findById
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
     user.isPremium = isPremium;
 
     if (isPremium && subscriptionType) {
-      const plan = SUBSCRIPTION_PLANS[subscriptionType];
-      if (plan) {
-        const now = new Date();
-        const startDate = user.premiumExpiryDate > now ? user.premiumExpiryDate : now;
-        user.premiumExpiryDate = new Date(startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
-      }
+        // Fetch latest plans from DB to avoid using stale data
+        const plansSetting = await Setting.findOne({ key: 'subscriptionPlans' });
+        const plans = plansSetting ? plansSetting.value : SUBSCRIPTION_PLANS;
+        const planKey = Object.keys(plans).find(key => key.toLowerCase() === subscriptionType.toLowerCase());
+
+        if (planKey && plans[planKey]) {
+            const plan = plans[planKey];
+            const now = new Date();
+            const startDate = user.premiumExpiryDate > now ? user.premiumExpiryDate : now;
+            user.premiumExpiryDate = new Date(startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
+        }
     } else if (!isPremium) {
-      user.premiumExpiryDate = null;
+        user.premiumExpiryDate = null;
     }
 
     await user.save();
-
-    res.json({
-      message: `User ${isPremium ? 'upgraded to' : 'downgraded from'} premium`,
-      user: transformDoc(user)
-    });
+    res.json({ message: `User premium status updated`, user: transformDoc(user) });
   } catch (error) {
-    console.error('User premium update error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// --- PATCH END ---
 
 app.put('/api/admin/users/:id/status', authenticateAdmin, async (req, res) => {
   try {
@@ -1021,34 +995,39 @@ app.post('/api/users/update-watch-time', authenticateToken, async (req, res) => 
     }
 });
 
-// Payment Routes
+// --- PATCH: Updated payment initiation to use installationId ---
 app.post('/api/payment/initiate-zenopay', authenticateToken, async (req, res) => {
-    const { customerName, phoneNumber, subscriptionType } = req.body;
-    const user = await User.findOne({ id: req.user.userId });
+    const { customerName, phoneNumber, subscriptionType, installationId } = req.body;
 
-    if (!customerName || !phoneNumber || !subscriptionType || !SUBSCRIPTION_PLANS[subscriptionType]) {
-        return res.status(400).json({ error: 'Invalid request details. Name, phone, and plan are required.' });
+    if (!customerName || !phoneNumber || !subscriptionType || !installationId) {
+        return res.status(400).json({ error: 'Invalid request. Name, phone, plan, and installationId are required.' });
     }
 
-    const plan = SUBSCRIPTION_PLANS[subscriptionType];
+    const planKey = Object.keys(SUBSCRIPTION_PLANS).find(key => key.toLowerCase() === subscriptionType.toLowerCase());
+    if (!planKey) {
+        return res.status(400).json({ error: `Subscription plan '${subscriptionType}' not found.` });
+    }
+    const plan = SUBSCRIPTION_PLANS[planKey];
     const orderId = uuidv4();
 
     await new Payment({
         orderId,
-        userId: user.id,
+        userId: req.user.userId,
+        installationId: installationId,
+        phoneNumber: phoneNumber,
         customerName: customerName,
         amount: plan.amount,
-        subscriptionType,
+        subscriptionType: subscriptionType,
         status: 'pending',
     }).save();
 
     const zenoPayload = {
         order_id: orderId,
-        buyer_email: user.email || `${user.deviceId}@kijiweni.tv`,
         buyer_name: customerName,
         buyer_phone: phoneNumber,
+        buyer_email: `${customerName.replace(/\s+/g, '.').toLowerCase()}@kijiweni.tv`,
         amount: plan.amount,
-        webhook_url: `${process.env.YOUR_BACKEND_URL}/api/payment/zenopay-webhook`
+        webhook_url: `${process.env.YOUR_BACKEND_URL || 'https://kijiwenitvmax-backend.onrender.com'}/api/payment/zenopay-webhook`
     };
 
     try {
@@ -1071,61 +1050,63 @@ app.post('/api/payment/initiate-zenopay', authenticateToken, async (req, res) =>
     }
 });
 
+// --- PATCH: Updated webhook to be anchored to installationId ---
 app.post('/api/payment/zenopay-webhook', async (req, res) => {
-    // Log every incoming webhook attempt to help with debugging
     console.log('--- ZenoPay Webhook Received ---');
-    console.log('Headers:', req.headers);
     console.log('Body:', req.body);
 
-   const { order_id, payment_status, reference } = req.body;
-if (!order_id || !payment_status) {
-    console.warn('Webhook received with missing order_id or payment_status.');
-    return res.status(400).send('Bad Request: Missing required fields.');
-}
+    const { order_id, payment_status, reference } = req.body;
+    if (!order_id || !payment_status) {
+        return res.status(400).send('Bad Request: Missing required fields.');
+    }
 
-    console.log(`Processing webhook for order ${order_id}, status: ${payment_status}`);
-
-    // --- Logic with Error Handling ---
     try {
         if (payment_status === 'COMPLETED') {
             const payment = await Payment.findOne({ orderId: order_id });
 
             if (!payment) {
-                console.warn(`Webhook for unknown Order ID received: ${order_id}. Acknowledging.`);
                 return res.status(200).send('Acknowledged (Order not found)');
             }
             if (payment.status === 'completed') {
-                console.log(`Webhook for already completed Order ID received: ${order_id}. Acknowledging.`);
                 return res.status(200).send('Acknowledged (Already completed)');
             }
 
             payment.status = 'completed';
             payment.zenoTransactionId = reference;
             await payment.save();
-            console.log(`Payment record for ${order_id} updated to 'completed'.`);
 
-            const user = await User.findOne({ id: payment.userId });
-            if (user) {
-                const plan = SUBSCRIPTION_PLANS[payment.subscriptionType];
-                const now = new Date();
-                const startDate = user.premiumExpiryDate && user.premiumExpiryDate > now ? user.premiumExpiryDate : now;
-
-                user.isPremium = true;
-                user.premiumExpiryDate = new Date(startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
-                await user.save();
-
-                console.log(`SUCCESS: User ${user.id} upgraded to premium. New expiry: ${user.premiumExpiryDate}`);
-            } else {
-                console.error(`CRITICAL: Could not find user with ID ${payment.userId} for completed payment ${order_id}.`);
+            let user = null;
+            if (payment.installationId) {
+              user = await User.findOne({ installationId: payment.installationId });
             }
-        } else {
-             console.log(`Received non-completed status '${payment_status}' for order ${order_id}. No action taken.`);
+            if (!user && payment.phoneNumber) {
+              user = await User.findOne({ phoneNumber: payment.phoneNumber });
+            }
+
+            if (user) {
+                const planKey = Object.keys(SUBSCRIPTION_PLANS).find(p => p.toLowerCase() === payment.subscriptionType.toLowerCase());
+                if (planKey) {
+                    const plan = SUBSCRIPTION_PLANS[planKey];
+                    const now = new Date();
+                    const startDate = user.premiumExpiryDate && user.premiumExpiryDate > now ? user.premiumExpiryDate : now;
+
+                    user.isPremium = true;
+                    user.premiumExpiryDate = new Date(startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
+
+                    if (!user.phoneNumber && payment.phoneNumber) {
+                        user.phoneNumber = payment.phoneNumber;
+                    }
+
+                    await user.save();
+                    console.log(`SUCCESS: User ${user.id} upgraded to premium. New expiry: ${user.premiumExpiryDate}`);
+                }
+            } else {
+                console.error(`CRITICAL: Could not find user for payment ${order_id}. Identifiers: instId=${payment.installationId}, phone=${payment.phoneNumber}`);
+            }
         }
-
         res.status(200).send('Webhook processed successfully');
-
     } catch (error) {
-        console.error(`CRITICAL ERROR while processing webhook for order ${order_id}:`, error);
+        console.error(`CRITICAL ERROR processing webhook for order ${order_id}:`, error);
         res.status(500).send('Internal Server Error');
     }
 });
