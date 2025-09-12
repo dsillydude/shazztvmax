@@ -27,7 +27,7 @@ const app = express();
 // --- Middleware ------------------------------------------------------------
 app.use(helmet());
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['https://kijiwenitvmax.onrender.com', 'https://kijiwenitvmax.onrender.com'],
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['https://shazztvmax.onrender.com', 'https://shazztvmax-backend.onrender.com'],
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
@@ -1025,9 +1025,9 @@ app.post('/api/payment/initiate-zenopay', authenticateToken, async (req, res) =>
         order_id: orderId,
         buyer_name: customerName,
         buyer_phone: phoneNumber,
-        buyer_email: `${customerName.replace(/\s+/g, '.').toLowerCase()}@kijiweni.tv`,
+        buyer_email: `${customerName.replace(/\s+/g, '.').toLowerCase()}@shazztvmax.com`,
         amount: plan.amount,
-        webhook_url: `${process.env.YOUR_BACKEND_URL || 'https://kijiwenitvmax-backend.onrender.com'}/api/payment/zenopay-webhook`
+        webhook_url: `${process.env.YOUR_BACKEND_URL || 'https://shazztvmax-backend.onrender.com'}/api/payment/zenopay-webhook`
     };
 
     try {
@@ -1288,7 +1288,7 @@ app.post('/api/admin/seed', async (req, res) => {
     if (adminCount === 0) {
       const defaultAdmin = new Admin({
         username: 'admin',
-        email: 'admin@kijiweni.tv',
+        email: 'admin@shazztvmax.com',
         password: await bcrypt.hash('shazz321', 10),
         role: 'super_admin'
       });
@@ -1319,3 +1319,4 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 
 module.exports = app;
+
