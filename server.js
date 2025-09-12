@@ -1,9 +1,9 @@
-/* * =================================================================
- * SHAZZ TV MAX Backend Server - v2.4 (URL-based Banners)
+/*
+ * =================================================================
+ * ShazzTV Max Backend Server - v2.5 (Strict installationId)
  * -----------------------------------------------------------------
- * Patched banner creation/update to accept an image URL
- * instead of a file upload.
- * Patched app configuration to save settings to the database.
+ * Patched to completely remove deviceId and deviceFingerprint from
+ * all schemas and core logic, following the Burudani server model.
  * =================================================================
  */
 
@@ -27,49 +27,30 @@ const app = express();
 // --- Middleware ------------------------------------------------------------
 app.use(helmet());
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['https://shazztvmax.onrender.com', 'https://shazztvmax-backend.onrender.com'],
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['https://shazztvmax.onrender.com', 'https://shazztvmax.onrender.com'],
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
-
-// --- PATCH START: Trust proxy to get the correct IP address ---
-// This is important if your app is behind a load balancer or proxy (like on Render, Heroku, etc.)
 app.set('trust proxy', true);
-// --- PATCH END ---
 
-// Static file serving for uploaded images
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// --- Constants & Config -------------------------------------------------
-const TRIAL_MINUTES = 0;
-// These are now just defaults, the DB will be the source of truth.
-let SUBSCRIPTION_PLANS = {
-    weekly: { durationDays: 7, amount: 1000 },
-    monthly: { durationDays: 30, amount: 3000 },
-    yearly: { durationDays: 365, amount: 30000 },
-};
-let appSettings = {
-  whatsappLink: 'https://wa.me/255712345678' // Default fallback
-};
+// --- MongoDB Connection & Settings System ---
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://mackdsilly1:Ourfam2019@shazztvmax.qfisgkc.mongodb.net/?retryWrites=true&w=majority&appName=ShazzTvMax';
+const JWT_SECRET = process.env.JWT_SECRET || '242663';
 
-
-// --- MongoDB Schemas -----------------------------------------------------
 const SettingSchema = new mongoose.Schema({
   key: { type: String, unique: true, required: true },
   value: { type: mongoose.Schema.Types.Mixed, required: true },
 });
 const Setting = mongoose.model('Setting', SettingSchema);
 
-// --- Function to load settings from DB on startup (MODIFIED) ---
 async function loadSettingsFromDatabase() {
   try {
-    // Load Subscription Plans
     const plansSetting = await Setting.findOne({ key: 'subscriptionPlans' });
     if (plansSetting) {
       SUBSCRIPTION_PLANS = plansSetting.value;
@@ -78,49 +59,43 @@ async function loadSettingsFromDatabase() {
       await new Setting({ key: 'subscriptionPlans', value: SUBSCRIPTION_PLANS }).save();
       console.log('✅ Default subscription plans saved to database for the first time.');
     }
-
-    // Load App Settings (like WhatsApp link)
-    const appSettingsSetting = await Setting.findOne({ key: 'appSettings' });
-    if (appSettingsSetting) {
-      appSettings = appSettingsSetting.value;
-      console.log('✅ App settings loaded from database.');
-    } else {
-      await new Setting({ key: 'appSettings', value: appSettings }).save();
-      console.log('✅ Default app settings saved to database for the first time.');
-    }
-
   } catch (error) {
     console.error('❌ Failed to load settings from database:', error);
   }
 }
 
-// --- MongoDB Connection ----------------------------------------------------
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://mackdsilly1:Ourfam2019@shazztvmax.qfisgkc.mongodb.net/?retryWrites=true&w=majority&appName=ShazzTvMax';
-
 mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('✅ Connected to MongoDB');
-    loadSettingsFromDatabase(); // Load all settings after connecting to DB
+    loadSettingsFromDatabase();
   })
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
 
+// --- Constants & Config for Paywall ---
+const TRIAL_MINUTES = 0;
+let SUBSCRIPTION_PLANS = {
+    weekly: { durationDays: 7, amount: 1000 },
+    monthly: { durationDays: 30, amount: 3000 },
+    yearly: { durationDays: 365, amount: 30000 },
+};
+
 // --- Database Models -------------------------------------------------------
 
-// --- PATCH: Replaced old UserSchema with the modern installationId version ---
 const UserSchema = new mongoose.Schema({
   installationId: { type: String, unique: true, sparse: true },
   email: { type: String, unique: true, sparse: true },
   password: { type: String },
   phoneNumber: { type: String, unique: true, sparse: true },
+  // REMOVED: deviceId
+  // REMOVED: deviceFingerprint
   isPremium: { type: Boolean, default: false },
   premiumExpiryDate: { type: Date },
   lastLogin: { type: Date },
   isActive: { type: Boolean, default: true }
-}, { timestamps: true }); // Using timestamps provides createdAt/updatedAt automatically
+}, { timestamps: true });
 const User = mongoose.model('User', UserSchema);
 
-// Admin Schema
 const AdminSchema = new mongoose.Schema({
   id: { type: String, default: uuidv4, unique: true },
   username: { type: String, unique: true, required: true },
@@ -133,7 +108,6 @@ const AdminSchema = new mongoose.Schema({
 });
 const Admin = mongoose.model('Admin', AdminSchema);
 
-// Channel Schema
 const ChannelSchema = new mongoose.Schema({
   channelId: { type: String, unique: true, required: true },
   name: { type: String, required: true },
@@ -149,12 +123,11 @@ const ChannelSchema = new mongoose.Schema({
   isPremium: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
   position: { type: Number, default: 0 },
-  assignedContent: [{ type: String }], // Array of content IDs
+  assignedContent: [{ type: String }],
   createdAt: { type: Date, default: Date.now }
 });
 const Channel = mongoose.model('Channel', ChannelSchema);
 
-// Content Schema
 const ContentSchema = new mongoose.Schema({
   id: { type: String, default: uuidv4, unique: true },
   title: { type: String, required: true },
@@ -176,25 +149,24 @@ const ContentSchema = new mongoose.Schema({
 });
 const Content = mongoose.model('Content', ContentSchema);
 
-// Hero Banner Schema
 const HeroBannerSchema = new mongoose.Schema({
   id: { type: String, default: uuidv4, unique: true },
   title: { type: String, required: true },
   description: { type: String },
   imageUrl: { type: String, required: true },
   actionType: { type: String, enum: ['channel', 'content', 'external'], required: true },
-  actionValue: { type: String }, // channelId, contentId, or external URL
+  actionValue: { type: String },
   isActive: { type: Boolean, default: true },
   position: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now }
 });
 const HeroBanner = mongoose.model('HeroBanner', HeroBannerSchema);
 
-// --- PATCH: Updated PaymentSchema to include installationId ---
 const PaymentSchema = new mongoose.Schema({
   orderId: { type: String, required: true, unique: true },
-  userId: { type: String }, // This is now the MongoDB _id
-  installationId: { type: String, index: true }, // The new primary link
+  userId: { type: String },
+  installationId: { type: String, index: true },
+  // REMOVED: deviceId
   phoneNumber: { type: String, index: true },
   customerName: { type: String },
   amount: { type: Number, required: true },
@@ -208,8 +180,6 @@ const PaymentSchema = new mongoose.Schema({
 const Payment = mongoose.model('Payment', PaymentSchema);
 
 // --- Helper Functions ------------------------------------------------------
-
-// --- PATCH: Standardized transformDoc helper ---
 function transformDoc(doc) {
   if (!doc) return null;
   const obj = doc.toObject ? doc.toObject() : { ...doc };
@@ -239,7 +209,23 @@ function transformArray(docs) {
   return (docs || []).map(transformDoc);
 }
 
-// Generate JWT Token
+function sanitizeEmail(email) {
+  if (!email) return 'user@shazztvmax.tv'; // fallback if missing
+
+  email = email.trim();
+
+  // Fix "name.@domain.com" → "name@domain.com"
+  email = email.replace(/\.@/, '@');
+
+  // Simple regex validation
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return 'user@shazztvmax.tv'; // fallback default if still invalid
+  }
+
+  return email;
+}
+
 function generateToken(user, isAdmin = false) {
   const payload = isAdmin ? {
     adminId: user.id || user._id,
@@ -247,57 +233,39 @@ function generateToken(user, isAdmin = false) {
     role: user.role
   } : {
     userId: user.id || user._id,
-    deviceId: user.deviceId,
+    // REMOVED: deviceId from token payload
     isPremium: user.isPremium
   };
 
-  return jwt.sign(payload, process.env.JWT_SECRET, {
+  return jwt.sign(payload, JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || '7d'
   });
 }
 
-// Middleware to verify JWT token
 function authenticateToken(req, res, next) {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Access token required' });
 
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired token' });
-    }
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid or expired token' });
     req.user = user;
     next();
   });
 }
 
-// Middleware to verify admin token
 function authenticateAdmin(req, res, next) {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Admin access token required' });
 
-  if (!token) {
-    return res.status(401).json({ error: 'Admin access token required' });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, async (err, decoded) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired admin token' });
-    }
-
-    if (!decoded.adminId) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
+  jwt.verify(token, JWT_SECRET, async (err, decoded) => {
+    if (err) return res.status(403).json({ error: 'Invalid or expired admin token' });
+    if (!decoded.adminId) return res.status(403).json({ error: 'Admin access required' });
 
     try {
       const admin = await Admin.findOne({ id: decoded.adminId, isActive: true });
-      if (!admin) {
-        return res.status(403).json({ error: 'Admin not found or inactive' });
-      }
-
+      if (!admin) return res.status(403).json({ error: 'Admin not found or inactive' });
       req.admin = decoded;
       next();
     } catch (error) {
@@ -306,81 +274,64 @@ function authenticateAdmin(req, res, next) {
   });
 }
 
-// Multer configuration for file uploads
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, 'uploads/');
-  },
-  filename: function (req, file, cb) {
+  destination: (req, file, cb) => cb(null, 'uploads/'),
+  filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
   }
 });
-
 const upload = multer({
   storage: storage,
-  limits: {
-    fileSize: 5 * 1024 * 1024 // 5MB limit
-  },
-  fileFilter: function (req, file, cb) {
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed!'), false);
-    }
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only image files are allowed!'), false);
   }
 });
 
 // --- API Routes ------------------------------------------------------------
-
-// --- App Configuration (MODIFIED TO USE DATABASE) ---
-
-// PUBLIC ENDPOINT: For the main app to get the config
+// ... (Config and Subscription Plan routes remain the same) ...
 app.get('/api/config', async (req, res) => {
-    try {
-        // The 'appSettings' variable is loaded from the DB on startup.
-        // This serves the latest settings from memory for performance.
-        res.json(appSettings);
-    } catch (error) {
-        console.error('Error fetching config:', error);
-        res.status(500).json({ error: 'Failed to fetch settings' });
+  try {
+    const settings = await Setting.findOne({ key: 'appSettings' });
+    if (settings && settings.value) {
+      res.json(settings.value);
+    } else {
+      res.json({ whatsappLink: 'https://wa.me/255712345678' });
     }
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load configuration' });
+  }
 });
 
-// ADMIN ENDPOINT: For the admin panel to update the config
 app.put('/api/admin/config', authenticateAdmin, async (req, res) => {
-    try {
-        const { whatsappLink } = req.body;
-        if (whatsappLink) {
-            // Find and update the setting in the database, or create it if it doesn't exist
-            const updatedSetting = await Setting.findOneAndUpdate(
-                { key: 'appSettings' },
-                { $set: { 'value.whatsappLink': whatsappLink } },
-                { upsert: true, new: true }
-            );
-            // Update the in-memory settings as well for immediate access across the app
-            appSettings = updatedSetting.value;
-        }
-        res.json({ message: 'Settings updated successfully', settings: appSettings });
-    } catch (error) {
-        console.error('Error updating config:', error);
-        res.status(500).json({ error: 'Failed to update settings' });
+  try {
+    const { whatsappLink } = req.body;
+    if (!whatsappLink) {
+      return res.status(400).json({ error: 'whatsappLink is required' });
     }
+    const updatedSettings = await Setting.findOneAndUpdate(
+      { key: 'appSettings' },
+      { $set: { value: { whatsappLink: whatsappLink } } },
+      { new: true, upsert: true }
+    );
+    res.json({
+      message: 'Settings updated successfully',
+      settings: updatedSettings.value
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save settings' });
+  }
 });
 
-
-// --- NEW: Public endpoint for the main app to fetch subscription plans ---
 app.get('/api/subscriptions/plans', async (req, res) => {
   try {
-    // We try to find the plans saved in the database first.
     const plansSetting = await Setting.findOne({ key: 'subscriptionPlans' });
-
     if (plansSetting && plansSetting.value) {
-      // If found in DB, return them
       console.log('✅ Sent subscription plans from database.');
       return res.json({ plans: plansSetting.value });
     } else {
-      // As a fallback, if nothing is in the DB, return the default hardcoded plans.
       console.log('⚠️ Sent default (fallback) subscription plans.');
       return res.json({ plans: SUBSCRIPTION_PLANS });
     }
@@ -390,68 +341,93 @@ app.get('/api/subscriptions/plans', async (req, res) => {
   }
 });
 
-// Health Check
+app.get('/api/admin/subscriptions', authenticateAdmin, (req, res) => {
+  res.json({
+    plans: SUBSCRIPTION_PLANS
+  });
+});
+
+app.put('/api/admin/subscriptions', authenticateAdmin, async (req, res) => {
+  try {
+    const { plans } = req.body;
+    if (!plans || typeof plans !== 'object') {
+      return res.status(400).json({ error: 'Invalid plans data' });
+    }
+    for (const [key, plan] of Object.entries(plans)) {
+      if (!plan.durationDays || !plan.amount || typeof plan.durationDays !== 'number' || typeof plan.amount !== 'number') {
+        return res.status(400).json({ error: `Invalid plan structure for ${key}` });
+      }
+    }
+    await Setting.findOneAndUpdate(
+        { key: 'subscriptionPlans' },
+        { value: plans },
+        { upsert: true, new: true }
+    );
+    SUBSCRIPTION_PLANS = plans;
+    res.json({
+      message: 'Subscription plans updated and saved successfully',
+      plans: SUBSCRIPTION_PLANS
+    });
+  } catch (error) {
+    console.error('Subscription update error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    message: 'SHAZZ TV MAX Backend is running',
+    message: 'ShizzTv Max Backend is running',
     timestamp: new Date().toISOString()
   });
 });
 
-// --- Authentication Routes (Existing) --------------------------------------
-
-// --- PATCH: Replaced entire device-login with the strict installationId version ---
+// MODIFIED: Simplified to be identical to Burudani server
 app.post('/api/auth/device-login', async (req, res) => {
-    try {
-        const { installationId } = req.body;
-        if (!installationId) {
-            return res.status(400).json({ error: 'installationId is required' });
-        }
-
-        let user = await User.findOne({ installationId });
-
-        if (user) {
-            user.lastLogin = new Date();
-            await user.save();
-        } else {
-            user = new User({
-                installationId,
-                lastLogin: new Date(),
-                isPremium: false
-            });
-            await user.save();
-        }
-
-        const token = generateToken(user);
-        res.json({
-            message: 'Login successful',
-            user: transformDoc(user),
-            token
-        });
-    } catch (error) {
-        console.error('Device login error:', error);
-        if (error.code === 11000) {
-            return res.status(500).json({ error: 'A unique user could not be created. Please try again.' });
-        }
-        res.status(500).json({ error: 'Internal server error' });
+  try {
+    const { installationId } = req.body; // Only accept installationId
+    if (!installationId) {
+      return res.status(400).json({ error: 'installationId is required' });
     }
+
+    let user = await User.findOne({ installationId });
+
+    if (user) {
+      // User exists, just update last login
+      user.lastLogin = new Date();
+      await user.save();
+    } else {
+      // User does not exist, create a new one
+      user = new User({
+        installationId,
+        lastLogin: new Date(),
+        isPremium: false
+      });
+      await user.save();
+    }
+
+    const token = generateToken(user);
+    res.json({ message: 'Login successful', user: transformDoc(user), token });
+
+  } catch (error) {
+    console.error('Device login error:', error);
+    if (error.code === 11000) {
+      return res.status(500).json({ error: 'Duplicate key error. Please try again.' });
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
-    const user = await User.findOne({ id: req.user.userId });
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    const user = await User.findOne({ _id: req.user.userId });
+    if (!user) return res.status(404).json({ error: 'User not found' });
     res.json({ user: transformDoc(user) });
   } catch (error) {
     console.error('Profile fetch error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-// --- Admin Authentication Routes -------------------------------------------
+// ... (Admin auth routes remain the same) ...
 
 app.post('/api/admin/login', async (req, res) => {
   try {
@@ -502,8 +478,7 @@ app.get('/api/admin/me', authenticateAdmin, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-// --- Admin User Management Routes ------------------------------------------
+// MODIFIED: Admin user search to remove deviceId
 app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
   try {
     const {
@@ -517,33 +492,21 @@ app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
     } = req.query;
 
     const filter = {};
-
     if (search) {
       filter.$or = [
         { email: { $regex: search, $options: 'i' } },
         { phoneNumber: { $regex: search, $options: 'i' } },
-        { deviceId: { $regex: search, $options: 'i' } }
+        { installationId: { $regex: search, $options: 'i' } } // Added installationId to search
       ];
     }
+    if (isPremium !== undefined) filter.isPremium = isPremium === 'true';
+    if (isActive !== undefined) filter.isActive = isActive === 'true';
 
-    if (isPremium !== undefined) {
-      filter.isPremium = isPremium === 'true';
-    }
-
-    if (isActive !== undefined) {
-      filter.isActive = isActive === 'true';
-    }
-
-    const sort = {};
-    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
-
+    const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     const [users, total] = await Promise.all([
-      User.find(filter)
-        .sort(sort)
-        .skip(skip)
-        .limit(parseInt(limit)),
+      User.find(filter).sort(sort).skip(skip).limit(parseInt(limit)),
       User.countDocuments(filter)
     ]);
 
@@ -561,7 +524,7 @@ app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
+// ... (User stats, premium/status update, and user update routes remain the same) ...
 app.get('/api/admin/users/stats', authenticateAdmin, async (req, res) => {
   try {
     const [
@@ -602,17 +565,18 @@ app.get('/api/admin/users/stats', authenticateAdmin, async (req, res) => {
   }
 });
 
-// --- PATCH START: Upgraded admin routes to use findById and fetch live plans ---
 app.put('/api/admin/users/:id/premium', authenticateAdmin, async (req, res) => {
   try {
     const { isPremium, subscriptionType = 'monthly' } = req.body;
-    const user = await User.findById(req.params.id); // Use findById
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     user.isPremium = isPremium;
 
     if (isPremium && subscriptionType) {
-        // Fetch latest plans from DB to avoid using stale data
         const plansSetting = await Setting.findOne({ key: 'subscriptionPlans' });
         const plans = plansSetting ? plansSetting.value : SUBSCRIPTION_PLANS;
         const planKey = Object.keys(plans).find(key => key.toLowerCase() === subscriptionType.toLowerCase());
@@ -628,18 +592,23 @@ app.put('/api/admin/users/:id/premium', authenticateAdmin, async (req, res) => {
     }
 
     await user.save();
-    res.json({ message: `User premium status updated`, user: transformDoc(user) });
+
+    res.json({
+      message: `User ${isPremium ? 'upgraded to' : 'downgraded from'} premium`,
+      user: transformDoc(user)
+    });
   } catch (error) {
+    console.error('User premium update error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// --- PATCH END ---
+
 
 app.put('/api/admin/users/:id/status', authenticateAdmin, async (req, res) => {
   try {
     const { isActive } = req.body;
-    const user = await User.findOneAndUpdate(
-      { id: req.params.id },
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
       { isActive },
       { new: true }
     );
@@ -666,8 +635,8 @@ app.put('/api/admin/users/:id', authenticateAdmin, async (req, res) => {
     if (email !== undefined) updateData.email = email;
     if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
 
-    const user = await User.findOneAndUpdate(
-      { id: req.params.id },
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
       updateData,
       { new: true }
     );
@@ -685,49 +654,7 @@ app.put('/api/admin/users/:id', authenticateAdmin, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-// --- Admin Subscription Management Routes ----------------------------------
-app.get('/api/admin/subscriptions', authenticateAdmin, (req, res) => {
-  res.json({
-    plans: SUBSCRIPTION_PLANS
-  });
-});
-
-app.put('/api/admin/subscriptions', authenticateAdmin, async (req, res) => {
-  try {
-    const { plans } = req.body;
-
-    if (!plans || typeof plans !== 'object') {
-      return res.status(400).json({ error: 'Invalid plans data' });
-    }
-
-    // Validation (no change)
-    for (const [key, plan] of Object.entries(plans)) {
-      if (!plan.durationDays || !plan.amount || typeof plan.durationDays !== 'number' || typeof plan.amount !== 'number') {
-        return res.status(400).json({ error: `Invalid plan structure for ${key}` });
-      }
-    }
-
-    // Save the updated plans to the database
-    await Setting.findOneAndUpdate(
-        { key: 'subscriptionPlans' },
-        { value: plans },
-        { upsert: true, new: true } // upsert:true creates the document if it doesn't exist
-    );
-
-    // Also update the in-memory variable for immediate access
-    SUBSCRIPTION_PLANS = plans;
-
-    res.json({
-      message: 'Subscription plans updated and saved successfully',
-      plans: SUBSCRIPTION_PLANS
-    });
-  } catch (error) {
-    console.error('Subscription update error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
+// ... (Payment stats and payments list routes remain the same) ...
 app.get('/api/admin/payments/stats', authenticateAdmin, async (req, res) => {
   try {
     const [
@@ -787,16 +714,11 @@ app.get('/api/admin/payments', authenticateAdmin, async (req, res) => {
     if (status) filter.status = status;
     if (subscriptionType) filter.subscriptionType = subscriptionType;
 
-    const sort = {};
-    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
-
+    const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     const [payments, total] = await Promise.all([
-      Payment.find(filter)
-        .sort(sort)
-        .skip(skip)
-        .limit(parseInt(limit)),
+      Payment.find(filter).sort(sort).skip(skip).limit(parseInt(limit)),
       Payment.countDocuments(filter)
     ]);
 
@@ -814,8 +736,8 @@ app.get('/api/admin/payments', authenticateAdmin, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// ... (Banner routes remain the same as they are already correct) ...
 
-// --- Admin Channel Management Routes (Extended) ----------------------------
 app.put('/api/admin/channels/:id/content', authenticateAdmin, async (req, res) => {
   try {
     const { contentIds } = req.body;
@@ -866,8 +788,7 @@ app.get('/api/admin/banners', authenticateAdmin, async (req, res) => {
     if (isActive !== undefined) {
       filter.isActive = isActive === 'true';
     }
-    const sort = {};
-    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
     const banners = await HeroBanner.find(filter).sort(sort);
     res.json({
       banners: transformArray(banners),
@@ -879,7 +800,6 @@ app.get('/api/admin/banners', authenticateAdmin, async (req, res) => {
   }
 });
 
-// Create new hero banner (Patched to use imageUrl)
 app.post('/api/admin/banners', authenticateAdmin, async (req, res) => {
   try {
     const { title, description, actionType, actionValue, imageUrl, isActive, position } = req.body;
@@ -910,7 +830,6 @@ app.post('/api/admin/banners', authenticateAdmin, async (req, res) => {
   }
 });
 
-// Update hero banner (Patched to use imageUrl)
 app.put('/api/admin/banners/:id', authenticateAdmin, async (req, res) => {
   try {
     const { title, description, actionType, actionValue, imageUrl, isActive, position } = req.body;
@@ -944,7 +863,6 @@ app.put('/api/admin/banners/:id', authenticateAdmin, async (req, res) => {
   }
 });
 
-// Delete hero banner
 app.delete('/api/admin/banners/:id', authenticateAdmin, async (req, res) => {
   try {
     const banner = await HeroBanner.findOneAndDelete({ id: req.params.id });
@@ -961,7 +879,6 @@ app.delete('/api/admin/banners/:id', authenticateAdmin, async (req, res) => {
 });
 
 
-// Image upload endpoint
 app.post('/api/admin/upload', authenticateAdmin, upload.single('image'), (req, res) => {
   try {
     if (!req.file) {
@@ -978,36 +895,23 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('image'), (req, r
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-// --- Existing Routes (Content Management, Payment, etc.) -------------------
-app.post('/api/users/update-watch-time', authenticateToken, async (req, res) => {
-    try {
-        const user = await User.findOne({ id: req.user.userId });
-        if (!user) return res.status(404).json({ error: 'User not found' });
-
-        if (user.isPremium && (!user.premiumExpiryDate || new Date(user.premiumExpiryDate) > new Date())) {
-            return res.json({ success: true, message: 'User is premium.' });
-        } else {
-            return res.status(402).json({ error: 'PAYWALL', message: 'Premium required to stream.' });
-        }
-    } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// --- PATCH: Updated payment initiation to use installationId ---
+// MODIFIED: Payment initiation now only uses installationId
 app.post('/api/payment/initiate-zenopay', authenticateToken, async (req, res) => {
     const { customerName, phoneNumber, subscriptionType, installationId } = req.body;
-
+    
     if (!customerName || !phoneNumber || !subscriptionType || !installationId) {
         return res.status(400).json({ error: 'Invalid request. Name, phone, plan, and installationId are required.' });
     }
 
-    const planKey = Object.keys(SUBSCRIPTION_PLANS).find(key => key.toLowerCase() === subscriptionType.toLowerCase());
-    if (!planKey) {
+    const plansSetting = await Setting.findOne({ key: 'subscriptionPlans' });
+    const plans = plansSetting ? plansSetting.value : SUBSCRIPTION_PLANS;
+    const planKey = Object.keys(plans).find(key => key.toLowerCase() === subscriptionType.toLowerCase());
+
+    if (!planKey || !plans[planKey]) {
         return res.status(400).json({ error: `Subscription plan '${subscriptionType}' not found.` });
     }
-    const plan = SUBSCRIPTION_PLANS[planKey];
+
+    const plan = plans[planKey];
     const orderId = uuidv4();
 
     await new Payment({
@@ -1025,9 +929,11 @@ app.post('/api/payment/initiate-zenopay', authenticateToken, async (req, res) =>
         order_id: orderId,
         buyer_name: customerName,
         buyer_phone: phoneNumber,
-        buyer_email: `${customerName.replace(/\s+/g, '.').toLowerCase()}@shazztvmax.com`,
+        buyer_email: sanitizeEmail(
+  `${customerName.replace(/\s+/g, '.').toLowerCase()}@shaztvmax.tv`
+),
         amount: plan.amount,
-        webhook_url: `${process.env.YOUR_BACKEND_URL || 'https://shazztvmax-backend.onrender.com'}/api/payment/zenopay-webhook`
+        webhook_url: `${process.env.YOUR_BACKEND_URL || 'https://shazztvmax.onrender.com'}/api/payment/zenopay-webhook`
     };
 
     try {
@@ -1050,7 +956,7 @@ app.post('/api/payment/initiate-zenopay', authenticateToken, async (req, res) =>
     }
 });
 
-// --- PATCH: Updated webhook to be anchored to installationId ---
+// MODIFIED: Webhook now only uses installationId and phoneNumber as a fallback
 app.post('/api/payment/zenopay-webhook', async (req, res) => {
     console.log('--- ZenoPay Webhook Received ---');
     console.log('Body:', req.body);
@@ -1065,44 +971,56 @@ app.post('/api/payment/zenopay-webhook', async (req, res) => {
             const payment = await Payment.findOne({ orderId: order_id });
 
             if (!payment) {
+                console.warn(`Webhook for unknown Order ID received: ${order_id}.`);
                 return res.status(200).send('Acknowledged (Order not found)');
             }
             if (payment.status === 'completed') {
+                console.log(`Webhook for already completed Order ID received: ${order_id}.`);
                 return res.status(200).send('Acknowledged (Already completed)');
             }
 
             payment.status = 'completed';
             payment.zenoTransactionId = reference;
             await payment.save();
+            console.log(`Payment record for ${order_id} updated to 'completed'.`);
 
             let user = null;
             if (payment.installationId) {
               user = await User.findOne({ installationId: payment.installationId });
             }
+            // Fallback to phone number only if installationId fails to find a user
             if (!user && payment.phoneNumber) {
+              console.log(`User not found by installationId, falling back to phoneNumber: ${payment.phoneNumber}`);
               user = await User.findOne({ phoneNumber: payment.phoneNumber });
             }
-
+            
             if (user) {
-                const planKey = Object.keys(SUBSCRIPTION_PLANS).find(p => p.toLowerCase() === payment.subscriptionType.toLowerCase());
-                if (planKey) {
-                    const plan = SUBSCRIPTION_PLANS[planKey];
+                const plansSetting = await Setting.findOne({ key: 'subscriptionPlans' });
+                const plans = plansSetting ? plansSetting.value : SUBSCRIPTION_PLANS;
+                const planKey = Object.keys(plans).find(p => p.toLowerCase() === payment.subscriptionType.toLowerCase());
+                
+                if(planKey && plans[planKey]) {
+                    const plan = plans[planKey];
                     const now = new Date();
                     const startDate = user.premiumExpiryDate && user.premiumExpiryDate > now ? user.premiumExpiryDate : now;
 
                     user.isPremium = true;
                     user.premiumExpiryDate = new Date(startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
-
+                    
                     if (!user.phoneNumber && payment.phoneNumber) {
                         user.phoneNumber = payment.phoneNumber;
                     }
-
+                    
                     await user.save();
                     console.log(`SUCCESS: User ${user.id} upgraded to premium. New expiry: ${user.premiumExpiryDate}`);
+                } else {
+                    console.error(`CRITICAL: Could not find subscription plan '${payment.subscriptionType}' for completed payment ${order_id}.`);
                 }
             } else {
                 console.error(`CRITICAL: Could not find user for payment ${order_id}. Identifiers: instId=${payment.installationId}, phone=${payment.phoneNumber}`);
             }
+        } else {
+            console.log(`Received non-completed status '${payment_status}' for order ${order_id}. No action taken.`);
         }
         res.status(200).send('Webhook processed successfully');
     } catch (error) {
@@ -1110,7 +1028,21 @@ app.post('/api/payment/zenopay-webhook', async (req, res) => {
         res.status(500).send('Internal Server Error');
     }
 });
+// ... (Content/Channel/Home/DRM routes remain the same) ...
+app.post('/api/users/update-watch-time', authenticateToken, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
+        if (user.isPremium && (!user.premiumExpiryDate || new Date(user.premiumExpiryDate) > new Date())) {
+            return res.json({ success: true, message: 'User is premium.' });
+        } else {
+            return res.status(402).json({ error: 'PAYWALL', message: 'Premium required to stream.' });
+        }
+    } catch (error) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
 // Channel CRUD
 app.post('/api/channels', authenticateAdmin, async (req, res) => {
     try {
@@ -1208,7 +1140,6 @@ app.delete('/api/content/:id', authenticateAdmin, async (req, res) => {
 // Home screen data
 app.get('/api/home-screen', async (req, res) => {
   try {
-      // Fetch all data in parallel for speed
       const [
         banners,
         sportsChannels,
@@ -1226,7 +1157,7 @@ app.get('/api/home-screen', async (req, res) => {
       const moreChannels = allChannels.filter(c => !sportsChannelIds.includes(c.channelId) && !tamthiliaChannelIds.includes(c.channelId));
 
       res.json({
-          banners: transformArray(banners), // ADDED BANNERS
+          banners: transformArray(banners),
           sportsChannels: transformArray(sportsChannels),
           tamthiliaContent: transformArray(tamthiliaChannels),
           moreChannels: transformArray(moreChannels)
@@ -1283,13 +1214,12 @@ app.post('/api/drm/token', authenticateToken, async (req, res) => {
 // Admin seeder
 app.post('/api/admin/seed', async (req, res) => {
   try {
-    // Create default admin if none exists
     const adminCount = await Admin.countDocuments();
     if (adminCount === 0) {
       const defaultAdmin = new Admin({
         username: 'admin',
-        email: 'admin@shazztvmax.com',
-        password: await bcrypt.hash('shazz321', 10),
+        email: 'admin@shazztvmax.tv',
+        password: await bcrypt.hash('admin123', 10),
         role: 'super_admin'
       });
       await defaultAdmin.save();
@@ -1301,6 +1231,25 @@ app.post('/api/admin/seed', async (req, res) => {
     console.error('Seed data error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// --- HLS Wrapper Route (Quick Fix for .ts) ---
+app.get('/hls/:id/index.m3u8', (req, res) => {
+  const { id } = req.params;
+
+  // Point to your existing .ts file
+  const tsUrl = `https://lipopotv.live/${id}.ts`;
+
+  // Build a minimal HLS manifest that wraps the .ts
+  const manifest = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:10
+#EXTINF:10,
+${tsUrl}
+#EXT-X-ENDLIST`;
+
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+  res.send(manifest);
 });
 
 // --- Error Handling & Server Start -----------------------------------------
@@ -1315,8 +1264,6 @@ app.use((error, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 SHAZZ TV Backend server v2.4 (URL Banners) running on port ${PORT}`);
+  console.log(`🚀 ShazzTv Max Backend server v2.5 (Strict installationId) running on port ${PORT}`);
 });
-
 module.exports = app;
-
