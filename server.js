@@ -844,10 +844,10 @@ app.put('/api/admin/banners/:id', authenticateAdmin, async (req, res) => {
     if (position !== undefined) updateData.position = position || 0;
 
     const banner = await HeroBanner.findOneAndUpdate(
-      { id: req.params.id },
-      updateData,
-      { new: true }
-    );
+  { _id: req.params.id }, // <--- FIX: Search by the correct _id field
+  updateData,
+  { new: true }
+);
 
     if (!banner) {
       return res.status(404).json({ error: 'Banner not found' });
@@ -865,7 +865,7 @@ app.put('/api/admin/banners/:id', authenticateAdmin, async (req, res) => {
 
 app.delete('/api/admin/banners/:id', authenticateAdmin, async (req, res) => {
   try {
-    const banner = await HeroBanner.findOneAndDelete({ id: req.params.id });
+    const banner = await HeroBanner.findOneAndDelete({ _id: req.params.id });
     if (!banner) {
       return res.status(404).json({ error: 'Banner not found' });
     }
