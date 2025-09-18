@@ -1044,11 +1044,18 @@ app.post('/api/users/update-watch-time', authenticateToken, async (req, res) => 
     }
 });
 // Channel CRUD
+// [REPLACE THIS ROUTE]
 app.post('/api/channels', authenticateAdmin, async (req, res) => {
     try {
         const newChannel = new Channel(req.body);
         await newChannel.save();
-        res.status(201).json({ channel: transformDoc(newChannel) });
+
+        // ⬇️ ADDED: After saving, fetch the complete, sorted list of all channels
+        const allChannels = await Channel.find({}).sort({ position: 1, name: 1 });
+        
+        // ✅ CHANGED: Return the full list so the UI can update seamlessly
+        res.status(201).json({ channels: transformArray(allChannels) });
+
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -1071,9 +1078,19 @@ app.get('/api/channels', async (req, res) => {
 
 app.put('/api/channels/:id', authenticateAdmin, async (req, res) => {
     try {
-        const channel = await Channel.findOneAndUpdate({ channelId: req.params.id }, req.body, { new: true });
-        if (!channel) return res.status(404).json({ error: 'Channel not found' });
-        res.json({ channel: transformDoc(channel) });
+        // 🐞 BUG FIX: Use the database _id from the URL parameter, not channelId
+        const updatedChannel = await Channel.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        
+        if (!updatedChannel) {
+            return res.status(404).json({ error: 'Channel not found' });
+        }
+        
+        // ⬇️ ADDED: After updating, fetch the complete, sorted list of all channels
+        const allChannels = await Channel.find({}).sort({ position: 1, name: 1 });
+        
+        // ✅ CHANGED: Return the full list
+        res.json({ channels: transformArray(allChannels) });
+
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
